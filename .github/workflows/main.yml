@@ -1,150 +1,53 @@
-name: Release
-
+name: GitHub-Relay-Tunnel
 on:
-  workflow_dispatch:  # این خط دکمه استارت دستی را اضافه می‌کند
-  push:
-    branches:
-      - main
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
+  workflow_dispatch: # اجرای دستی با دکمه
 
 jobs:
-  test:
-    name: Test
+  relay:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run tests
-        run: CGO_ENABLED=0 go test ./tests/... -v -count=1
-
-  build-and-release:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    runs-on: ubuntu-latest
-    needs: test
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: linux
-            goarch: arm
-            goarm: "7"
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-            ext: .exe
-          - goos: windows
-            goarch: "386"
-            ext: .exe
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Derive version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Build client
-        env:
-          CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm || '' }}
+      - name: Install Xray Core
         run: |
-          NAME="gh-tunnel-client_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.goarm && '_v' || '' }}${{ matrix.goarm || '' }}${{ matrix.ext || '' }}"
-          go build \
-            -trimpath \
-            -ldflags "-s -w -X main.Version=${{ steps.version.outputs.version }} -X main.Commit=${GITHUB_SHA::8}" \
-            -o "dist/${NAME}" \
-            ./cmd/client
-
-      - name: Build server
+          bash <(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
+          
+      - name: Start Relay Tunnel
         env:
-          CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm || '' }}
+          REMOTE_HOST: ${{ secrets.HOST }}
+          REMOTE_PORT: ${{ secrets.PORT }}
+          USER_UUID: ${{ secrets.UUID }}
         run: |
-          NAME="gh-tunnel-server_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.goarm && '_v' || '' }}${{ matrix.goarm || '' }}${{ matrix.ext || '' }}"
-          go build \
-            -trimpath \
-            -ldflags "-s -w -X main.Version=${{ steps.version.outputs.version }} -X main.Commit=${GITHUB_SHA::8}" \
-            -o "dist/${NAME}" \
-            ./cmd/server
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/
-          retention-days: 1
-
-  checksums-and-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    needs: build-and-release
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist/
-          merge-multiple: true
-
-      - name: Generate SHA256 checksums
-        working-directory: dist
-        run: sha256sum * > sha256sums.txt
-
-      - name: Derive version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: "v${{ steps.version.outputs.version }}"
-          draft: false
-          prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-alpha') || contains(github.ref, '-rc') }}
-          body: |
-            ## vpn-over-github v${{ steps.version.outputs.version }}
-
-            > ⚠️ **WARNING**: This tool tunnels traffic through GitHub. It likely violates GitHub's Terms of Service.
-            > Use only with explicit permission for security research, testing, or bypassing censorship where legal.
-            > See README for full security caveats.
-
-            ### Downloads
-            Download the binary for your platform below. Verify with `sha256sums.txt`.
-
-            ### Quick Start
-            **Client:**
-            ```bash
-            ./gh-tunnel-client -config client_config.yaml
-            ```
-            **Server:** See `install.sh` for automated setup or `example_server_config.yaml`.
-          files: dist/*
+          # ساخت کانفیگ رله: ورودی پورت 8080 گیت‌هاب -> خروجی به سرور تو
+          cat <<EOF > config.json
+          {
+            "inbounds": [{
+              "port": 8080,
+              "protocol": "vless",
+              "settings": { "clients": [{ "id": "$USER_UUID" }], "decryption": "none" },
+              "streamSettings": { "network": "tcp" }
+            }],
+            "outbounds": [{
+              "protocol": "vless",
+              "settings": {
+                "vnext": [{
+                  "address": "$REMOTE_HOST",
+                  "port": $REMOTE_PORT,
+                  "users": [{ "id": "$USER_UUID", "encryption": "none" }]
+                }]
+              },
+              "streamSettings": {
+                "network": "xhttp",
+                "xhttpSettings": { "path": "/" },
+                "security": "tls",
+                "tlsSettings": { "serverName": "$REMOTE_HOST" }
+              }
+            }]
+          }
+          EOF
+          
+          # اجرای ایکس‌ری در پس‌زمینه
+          /usr/local/bin/xray run -config config.json &
+          
+          # نصب و اجرای ابزار برای باز کردن پورت گیت‌هاب به بیرون
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+          ./cloudflared tunnel --url tcp://localhost:8080
