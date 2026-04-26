@@ -1,7 +1,10 @@
 name: Release
 
 on:
+  workflow_dispatch:  # این خط دکمه استارت دستی را اضافه می‌کند
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
