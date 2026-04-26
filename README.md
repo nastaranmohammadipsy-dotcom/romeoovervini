@@ -233,5 +233,5 @@ sudo bash uninstall.sh   # Linux with systemd
 
 ## License
 
-MIT — no warranty. Authors not responsible for misuse.
+MIT — no warranty. Authors not responsible for misuse....
 
